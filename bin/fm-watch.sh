@@ -371,6 +371,27 @@ esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+# Adaptive signal grace (latency fix). An explicitly set FM_SIGNAL_GRACE keeps the
+# historical fixed sleep of exactly that many seconds (tests and rollback rely on
+# this: put FM_SIGNAL_GRACE=30 in config/watch.env to restore the old behavior).
+# Otherwise the grace ends as soon as the signal set has settled:
+#   - a status write from a task that has a turn-end hook (state/<id>.turn-ended
+#     exists) waits for that task's turn-end, then FM_SIGNAL_GRACE_AFTER_TURNEND;
+#   - a pending turn-end alone waits FM_SIGNAL_GRACE_AFTER_TURNEND;
+#   - a status write with no turn-end hook (a secondmate reporting into this
+#     home's parent channel) waits until the status files have been quiet for
+#     FM_SIGNAL_GRACE_QUIET seconds;
+#   - never longer than FM_SIGNAL_GRACE_MAX seconds in total.
+# Measured 2026-11-22: a final status write precedes its turn-end by ~10-11 s, so
+# the 15 s ceiling still coalesces that pair; statuses written mid-run (most of
+# them, median 111 s before the turn-end) were never coalesced by 30 s either.
+if [ -n "${FM_SIGNAL_GRACE+x}" ]; then SIGNAL_GRACE_MODE=fixed; else SIGNAL_GRACE_MODE=adaptive; fi
+SIGNAL_GRACE_MAX=${FM_SIGNAL_GRACE_MAX:-15}
+SIGNAL_GRACE_AFTER_TURNEND=${FM_SIGNAL_GRACE_AFTER_TURNEND:-2}
+SIGNAL_GRACE_QUIET=${FM_SIGNAL_GRACE_QUIET:-3}
+case "$SIGNAL_GRACE_MAX" in ''|*[!0-9]*) SIGNAL_GRACE_MAX=15 ;; esac
+case "$SIGNAL_GRACE_AFTER_TURNEND" in ''|*[!0-9]*) SIGNAL_GRACE_AFTER_TURNEND=2 ;; esac
+case "$SIGNAL_GRACE_QUIET" in ''|*[!0-9]*) SIGNAL_GRACE_QUIET=3 ;; esac
 CLEANUP_LOCK_BOUND=${FM_WATCHER_CLEANUP_LOCK_BOUND:-2}  # seconds EXIT cleanup may
                                       # wait on the downtime-marker lock; a live
                                       # foreign holder must not strand a TERM'd
@@ -3700,6 +3721,75 @@ event_wait_or_sleep() {
   esac
 }
 
+# --- Latency-fix helpers: adaptive signal grace.
+
+# One-line signature of every status log and turn-end marker in this home: name,
+# sub-second mtime and size, in one stat call. Any append or touch changes it.
+signal_probe_sig() {
+  local files=()
+  shopt -s nullglob
+  files=("$STATE"/*.status "$STATE"/*.turn-ended)
+  shopt -u nullglob
+  [ "${#files[@]}" -gt 0 ] || { printf 'none\n'; return 0; }
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f '%N %Fm %z' "${files[@]}" 2>/dev/null | cksum
+  else
+    stat -c '%n %.9Y %s' "${files[@]}" 2>/dev/null | cksum
+  fi
+}
+
+# 0 when the pending rows still wait on a turn-end: a pending status log belongs
+# to a task with a turn-end hook whose own .turn-ended is not pending yet.
+signal_pending_awaits_turnend() {  # <pending-rows>
+  local sf sig f te
+  while IFS=$(printf '\t') read -r sf sig f; do
+    case "$f" in
+      *.status)
+        te="${f%.status}.turn-ended"
+        [ -e "$te" ] || continue
+        case "$1" in *"$te"*) ;; *) return 0 ;; esac
+        ;;
+    esac
+  done <<EOF
+$1
+EOF
+  return 1
+}
+
+# signal_grace_wait <pending-rows>: the grace before classifying a new signal
+# set. Fixed mode is the historical `sleep FM_SIGNAL_GRACE`; adaptive mode ends
+# as soon as the set has settled (see SIGNAL_GRACE_MODE above).
+signal_grace_wait() {  # <pending-rows>
+  local pending=$1 waited=0 quiet=0 sig prev
+  if [ "$SIGNAL_GRACE_MODE" = fixed ]; then
+    sleep "$SIGNAL_GRACE"
+    return 0
+  fi
+  prev=$(signal_probe_sig)
+  while [ "$waited" -lt "$SIGNAL_GRACE_MAX" ]; do
+    if ! signal_pending_awaits_turnend "$pending"; then
+      case "$pending" in
+        *.turn-ended*)
+          sleep "$SIGNAL_GRACE_AFTER_TURNEND"
+          return 0
+          ;;
+      esac
+      [ "$quiet" -lt "$SIGNAL_GRACE_QUIET" ] || return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+    sig=$(signal_probe_sig)
+    if [ "$sig" = "$prev" ]; then
+      quiet=$((quiet + 1))
+    else
+      quiet=0
+      prev=$sig
+      pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    fi
+  done
+  return 0
+}
+
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -4447,7 +4537,7 @@ EOF
   reconcile_overdue_pauses
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    signal_grace_wait "$pending"
     reconcile_overdue_pauses
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
