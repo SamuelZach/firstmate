@@ -39,7 +39,7 @@
 // consumption changes.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -664,7 +664,215 @@ const cleanupOnProcessExit = () => {
 };
 process.once("exit", cleanupOnProcessExit);
 
+// --- Instant second-mate terminal notice (latency fix) ---
+// Instant, model-free notice of a second mate's terminal report.
+//
+// A second mate reports into this home through state/<mate>.status. Its done:
+// or failed: line is already the mate's own checked outcome, but today the
+// captain only hears of it after this home's watcher wakes, the supervision
+// branch drains and checks, and main posts the branch's summary (about 25 s at
+// the median). This module lets the primary show the mate's line the moment
+// the wake arrives, as a display-only session entry: it is never sent to the
+// model, starts no turn, and costs no tokens. The wake itself keeps its normal
+// route, so the branch's checked summary still follows.
+//
+// Scope is deliberately narrow:
+//   - only status files of tasks whose metadata says kind=secondmate;
+//   - only lines whose leading verb is done or failed;
+//   - only bytes appended since this module last looked (its own cursor,
+//     state/.mate-terminal-notice-cursor), so history is never replayed: the
+//     first sighting of a file only records its current end.
+// Everything fails closed to "no notice": an unreadable file, a changed file
+// identity or a malformed cursor never throws into wake delivery.
+
+
+export const MATE_TERMINAL_NOTICE_ENTRY_TYPE = "fm-mate-terminal-notice";
+export const MATE_TERMINAL_NOTICE_LINE_MAX = 1500;
+
+export interface MateTerminalNotice {
+  version: 1;
+  mate: string;
+  verb: "done" | "failed";
+  key: string;
+  corr: string;
+  at: number | null;
+  line: string;
+  statusFile: string;
+  offset: number;
+}
+
+interface CursorRow {
+  ident: string;
+  offset: number;
+}
+
+export function cursorPathFor(state: string): string {
+  return `${state}/.mate-terminal-notice-cursor`;
+}
+
+function readCursor(path: string): Record<string, CursorRow> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, CursorRow> = {};
+    for (const [task, row] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!row || typeof row !== "object") continue;
+      const { ident, offset } = row as { ident?: unknown; offset?: unknown };
+      if (typeof ident === "string" && typeof offset === "number" && Number.isInteger(offset) && offset >= 0) {
+        out[task] = { ident, offset };
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeCursor(path: string, cursor: Record<string, CursorRow>): void {
+  const tmp = `${path}.tmp.${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(cursor)}\n`, { mode: 0o600 });
+  renameSync(tmp, path);
+}
+
+function isSecondmate(state: string, task: string): boolean {
+  try {
+    return readFileSync(`${state}/${task}.meta`, "utf8").split(/\r?\n/).includes("kind=secondmate");
+  } catch {
+    return false;
+  }
+}
+
+// The status files a wake message names: "signal: /abs/a.status /abs/b.status ..."
+// (other wake kinds name no status file and yield nothing).
+export function statusFilesInWake(message: string, state: string): string[] {
+  const files = new Set<string>();
+  for (const match of message.matchAll(/(?:^|\s)(\S+\.status)(?=\s|$)/g)) {
+    const path = match[1];
+    if (path.startsWith(`${state}/`) && !path.slice(state.length + 1).includes("/")) files.add(path);
+  }
+  return [...files];
+}
+
+export function parseTerminalLine(line: string): Pick<MateTerminalNotice, "verb" | "key" | "corr" | "at"> | null {
+  const verb = /^(done|failed)\b/.exec(line)?.[1] as "done" | "failed" | undefined;
+  if (!verb) return null;
+  const head = line.split(":", 1)[0];
+  const key = /\[key=([^\]\s]+)\]/.exec(head)?.[1] ?? "";
+  const corr = /\[corr=([^\]\s]+)\]/.exec(head)?.[1] ?? "";
+  const atText = /\[at=([0-9]+)\]/.exec(head)?.[1];
+  return { verb, key, corr, at: atText ? Number(atText) : null };
+}
+
+// Read new complete lines of every second-mate status file the wake names,
+// advance this module's cursor past them, and return the terminal ones.
+export function collectMateTerminalNotices(state: string, message: string): MateTerminalNotice[] {
+  const files = statusFilesInWake(message, state);
+  if (files.length === 0) return [];
+  const cursorPath = cursorPathFor(state);
+  const cursor = readCursor(cursorPath);
+  const notices: MateTerminalNotice[] = [];
+  let changed = false;
+  for (const statusFile of files) {
+    const task = statusFile.slice(state.length + 1).replace(/\.status$/, "");
+    if (!isSecondmate(state, task)) continue;
+    let size: number;
+    let ident: string;
+    try {
+      const st = statSync(statusFile);
+      if (!st.isFile()) continue;
+      size = st.size;
+      ident = `${st.dev}:${st.ino}:${Math.trunc(st.birthtimeMs)}`;
+    } catch {
+      continue;
+    }
+    const known = cursor[task];
+    if (!known || known.ident !== ident || known.offset > size) {
+      // First sighting or a replaced file: start at its current end.
+      cursor[task] = { ident, offset: size };
+      changed = true;
+      continue;
+    }
+    if (known.offset === size) continue;
+    let chunk: Buffer;
+    try {
+      const fd = openSync(statusFile, "r");
+      try {
+        chunk = Buffer.alloc(size - known.offset);
+        const read = readSync(fd, chunk, 0, chunk.length, known.offset);
+        chunk = chunk.subarray(0, read);
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      continue;
+    }
+    // Only complete lines: a partial trailing write is read next time.
+    const lastNewline = chunk.lastIndexOf(0x0a);
+    if (lastNewline < 0) continue;
+    const complete = chunk.subarray(0, lastNewline + 1);
+    let lineStart = known.offset;
+    for (const raw of complete.toString("utf8").split("\n")) {
+      const lineOffset = lineStart;
+      lineStart += Buffer.byteLength(raw, "utf8") + 1;
+      const line = raw.replace(/\r$/, "").trim();
+      if (!line) continue;
+      const parsed = parseTerminalLine(line);
+      if (!parsed) continue;
+      notices.push({
+        version: 1,
+        mate: task,
+        ...parsed,
+        line: line.length > MATE_TERMINAL_NOTICE_LINE_MAX ? `${line.slice(0, MATE_TERMINAL_NOTICE_LINE_MAX)}…` : line,
+        statusFile,
+        offset: lineOffset,
+      });
+    }
+    cursor[task] = { ident, offset: known.offset + complete.length };
+    changed = true;
+  }
+  if (changed) {
+    try {
+      writeCursor(cursorPath, cursor);
+    } catch {
+      // Without a durable cursor a notice could repeat; never show it twice.
+      return [];
+    }
+  }
+  return notices;
+}
+
+export function isMateTerminalNotice(data: unknown): data is MateTerminalNotice {
+  if (!data || typeof data !== "object") return false;
+  const d = data as Partial<MateTerminalNotice>;
+  return d.version === 1 && typeof d.mate === "string" && (d.verb === "done" || d.verb === "failed")
+    && typeof d.line === "string";
+}
+
 export default function (pi: ExtensionAPI) {
+  // A second mate's done/failed line is shown to the captain the moment its
+  // wake arrives, as a display-only session entry (never sent to the model, no
+  // turn, no tokens); the wake keeps its normal route below, so the branch's
+  // checked summary still follows. Away, main is parked, so nothing is shown.
+  function postMateTerminalNotices(message: string): void {
+    try {
+      if (process.env.FM_MATE_TERMINAL_NOTICE === "0") return;
+      if (afkPostureRecordPresent(state)) return;
+      for (const notice of collectMateTerminalNotices(state, message)) {
+        pi.appendEntry(MATE_TERMINAL_NOTICE_ENTRY_TYPE, notice);
+      }
+    } catch {
+      // Never let a notice affect wake delivery.
+    }
+  }
+  pi.registerEntryRenderer?.(MATE_TERMINAL_NOTICE_ENTRY_TYPE, (entry, _options, theme) => {
+    const data = (entry as { data?: unknown }).data;
+    if (!isMateTerminalNotice(data)) return undefined;
+    return new Text(
+      `${theme.fg("customMessageText", "\u2693")}${theme.fg("dim", ` ${data.mate} ${data.verb}: ${data.line}`)}`,
+      1,
+      0,
+    );
+  });
   let generation = createGeneration();
   activateGeneration(generation);
 
@@ -788,6 +996,7 @@ export default function (pi: ExtensionAPI) {
     restoration?: ActionableRestoration,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
+    postMateTerminalNotices(message);
     const recovery = restoration?.recovery;
     if (recovery) {
       // The confirmation ran inside the continuity operation, right after this
