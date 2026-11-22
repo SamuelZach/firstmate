@@ -61,7 +61,12 @@ fm_supervision_host_primary() {
         ;;
     esac
   fi
-  "$(dirname "${BASH_SOURCE[0]}")/fm-harness.sh" 2>/dev/null || printf 'unknown\n'
+  # The primary harness cannot change during one process, and fm-wake-drain
+  # asks twice per call; remember the first answer.
+  if [ -z "${_FM_SUPERVISION_HOST_PRIMARY_MEMO:-}" ]; then
+    _FM_SUPERVISION_HOST_PRIMARY_MEMO=$("$(dirname "${BASH_SOURCE[0]}")/fm-harness.sh" 2>/dev/null || printf 'unknown\n')
+  fi
+  printf '%s\n' "$_FM_SUPERVISION_HOST_PRIMARY_MEMO"
 }
 
 # fm_supervision_host_enabled <config-dir> [<primary-harness>]: 0 iff this home
