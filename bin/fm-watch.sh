@@ -392,6 +392,13 @@ SIGNAL_GRACE_QUIET=${FM_SIGNAL_GRACE_QUIET:-3}
 case "$SIGNAL_GRACE_MAX" in ''|*[!0-9]*) SIGNAL_GRACE_MAX=15 ;; esac
 case "$SIGNAL_GRACE_AFTER_TURNEND" in ''|*[!0-9]*) SIGNAL_GRACE_AFTER_TURNEND=2 ;; esac
 case "$SIGNAL_GRACE_QUIET" in ''|*[!0-9]*) SIGNAL_GRACE_QUIET=3 ;; esac
+# Early wake on status/turn-end writes (latency fix). Status logs and turn-end
+# markers are plain files with no push path, so they were only noticed by the
+# FM_POLL cycle. The between-cycle wait now re-stats them every
+# FM_SIGNAL_PROBE_SECS seconds (one stat call) and ends the wait early when any
+# changed; FM_POLL stays as the fallback cadence. 0 disables the probe.
+SIGNAL_PROBE_SECS=${FM_SIGNAL_PROBE_SECS:-1}
+case "$SIGNAL_PROBE_SECS" in ''|*[!0-9]*) SIGNAL_PROBE_SECS=1 ;; esac
 CLEANUP_LOCK_BOUND=${FM_WATCHER_CLEANUP_LOCK_BOUND:-2}  # seconds EXIT cleanup may
                                       # wait on the downtime-marker lock; a live
                                       # foreign holder must not strand a TERM'd
@@ -3671,7 +3678,7 @@ event_wait_or_sleep() {
   fi
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    signal_probe_sleep "$POLL"
     return
   fi
 
@@ -3687,7 +3694,7 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    signal_probe_sleep "$POLL"
     return
   fi
 
@@ -3696,7 +3703,7 @@ event_wait_or_sleep() {
   fm_wait_tmp_cleanup
   WATCHER_WAIT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-watch-wait.XXXXXX") || WATCHER_WAIT_TMP=
   TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 watcher_waited \
-    fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
+    signal_probe_bounded fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
   rc=$?
   rec=$WATCHER_CAPTURE
   fm_wait_tmp_cleanup
@@ -3711,7 +3718,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      sleep "$POLL"
+      signal_probe_sleep "$POLL"
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already
@@ -3721,7 +3728,7 @@ event_wait_or_sleep() {
   esac
 }
 
-# --- Latency-fix helpers: adaptive signal grace.
+# --- Latency-fix helpers: early wake on status/turn-end writes, adaptive grace.
 
 # One-line signature of every status log and turn-end marker in this home: name,
 # sub-second mtime and size, in one stat call. Any append or touch changes it.
@@ -3736,6 +3743,62 @@ signal_probe_sig() {
   else
     stat -c '%n %.9Y %s' "${files[@]}" 2>/dev/null | cksum
   fi
+}
+
+# signal_probe_sleep <secs>: sleep up to <secs>, returning early as soon as a
+# status log or turn-end marker changes. A plain sleep when the probe is off.
+# At most one probe interval longer than the plain sleep it replaces.
+signal_probe_sleep() {  # <secs>
+  local secs=$1 base spid
+  case "$secs" in ''|*[!0-9]*) sleep "$secs"; return 0 ;; esac
+  if [ "$SIGNAL_PROBE_SECS" -le 0 ] || [ "$SIGNAL_PROBE_SECS" -ge "$secs" ]; then
+    sleep "$secs"
+    return 0
+  fi
+  # The full-length `sleep <secs>` stays the watcher's own child, exactly as
+  # before (tests and diagnostics key on it); the probe runs beside it.
+  base=$(signal_probe_sig)
+  sleep "$secs" &
+  spid=$!
+  while kill -0 "$spid" 2>/dev/null; do
+    sleep "$SIGNAL_PROBE_SECS"
+    if [ "$(signal_probe_sig)" != "$base" ]; then
+      kill "$spid" 2>/dev/null || true
+      wait "$spid" 2>/dev/null || true
+      return 0
+    fi
+  done
+  wait "$spid" 2>/dev/null || true
+  return 0
+}
+
+# signal_probe_bounded <cmd...>: run a bounded event wait (it still ends by
+# itself within its own budget) but stop it early when a status log or turn-end
+# marker changes, returning 1 - the "clean wait, no actionable edge" result the
+# caller already handles by re-scanning on the next cycle. Otherwise the wait's
+# own exit status and output pass through unchanged.
+signal_probe_bounded() {  # <cmd...>
+  local base pid rc
+  if [ "$SIGNAL_PROBE_SECS" -le 0 ]; then
+    "$@"
+    return
+  fi
+  base=$(signal_probe_sig)
+  "$@" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$SIGNAL_PROBE_SECS"
+    kill -0 "$pid" 2>/dev/null || break
+    if [ "$(signal_probe_sig)" != "$base" ]; then
+      pkill -TERM -P "$pid" 2>/dev/null || true
+      kill -TERM "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 1
+    fi
+  done
+  wait "$pid"
+  rc=$?
+  return "$rc"
 }
 
 # 0 when the pending rows still wait on a turn-end: a pending status log belongs
