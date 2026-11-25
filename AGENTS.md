@@ -176,6 +176,13 @@ Route by the nature of the work against each registered secondmate scope, not by
 Keep `local-only` work in the main home.
 Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
+
+Carry the captain's exact words on every hop.
+When a request, steer, brief, or decision answer stems from something the captain said, pick that message with `bin/fm-captain-words.sh` (in a secondmate home, use the incoming request's inbox record) and pass its path as `--captain-words-file` to `fm-send` and to `fm-brief`, which quote it verbatim ahead of your text; never retype the words yourself, and when no capture exists, say so in your note rather than quoting from memory.
+Your reading goes after the quote and is labelled as yours: credit nothing to the captain that is not inside the quote, and never write that the captain asked, said, stated, or wants something you inferred.
+Relay a question as a question and a condition exactly as stated: "is it live?" asks for a check, not a change, and "leave it as a branch, then merge" does not authorize a merge now.
+Before writing a spec, find the concrete thing the captain named (an existing shortcut, a screen, the app shell) in the project; when it cannot be found, ask rather than substituting your own design.
+
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
 
@@ -221,7 +228,7 @@ When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--reso
 Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
-When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
+When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay them to the worker with `fm-send --captain-words-file`; Firstmate build constraints stay in `## Firstmate spec` or the steer.
 Supervise all live work under section 8.
 
 ### Selected delivery path and merge authority
@@ -388,6 +395,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 ## 11. Crewmate briefs
 
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
+Scaffold with `--captain-words-file` whenever the task stems from the captain's words (an incoming secondmate request record carries its quoted words through unchanged), and never edit the quoted block, which `fm-spawn` refuses.
 Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask and any boundary the captain stated, plus the context needed to read it, including the substance of any report, decision, or PR the ask refers to; never widen the ask there into a general goal or an enumerated coverage list, because the reviewer treats that subsection as acceptance criteria.
 Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions that ask requires, naming what stays out of scope when the ask is narrow; a generalization, consistency sweep, or extra hardening the captain did not ask for is follow-up work to note, not scope to add.
 `bin/fm-dod-lib.sh` owns intent authoring without added speaker labels or direct address, its provenance markers, what a no-mistakes worker may pass as `--intent`, and the string's self-sufficiency rule.

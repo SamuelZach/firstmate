@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell through its backend endpoint, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--captain-words-file <path>] <text...>
+#   --captain-words-file puts the captain's exact words, read from <path>, ahead
+#   of the text as a hashed verbatim block, and labels the text as Firstmate's
+#   note. Pass the captain's own message (or the inbox record that carried it in)
+#   whenever a request or steer stems from something the captain said; the
+#   format and its hop-to-hop rules live in bin/fm-captain-words-lib.sh.
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -279,6 +284,8 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-captain-words-lib.sh
+. "$SCRIPT_DIR/fm-captain-words-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -517,6 +524,7 @@ fi
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
+CAPTAIN_WORDS_FILE=
 fm_send_add_resolve_key() { # <key>
   local k=$1
   case "$k" in
@@ -558,6 +566,26 @@ while :; do
     }
     FIRE_AND_FORGET_ID=$2
     shift 2
+    ;;
+  --captain-words-file)
+    [ $# -ge 2 ] || {
+      echo "error: --captain-words-file requires a path" >&2
+      exit 1
+    }
+    [ -z "$CAPTAIN_WORDS_FILE" ] || {
+      echo "error: duplicate --captain-words-file" >&2
+      exit 1
+    }
+    CAPTAIN_WORDS_FILE=$2
+    shift 2
+    ;;
+  --captain-words-file=*)
+    [ -z "$CAPTAIN_WORDS_FILE" ] || {
+      echo "error: duplicate --captain-words-file" >&2
+      exit 1
+    }
+    CAPTAIN_WORDS_FILE=${1#--captain-words-file=}
+    shift
     ;;
   --fire-and-forget=*)
     [ -z "$FIRE_AND_FORGET_ID" ] || {
@@ -897,6 +925,11 @@ if [ "${1:-}" = "--key" ]; then
       echo "error: --fire-and-forget cannot accompany --key" >&2
       exit 1
     }
+  [ -z "$CAPTAIN_WORDS_FILE" ] ||
+    {
+      echo "error: --captain-words-file cannot accompany --key" >&2
+      exit 1
+    }
   case "$*" in
   *--resolve-key*)
     echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
@@ -938,6 +971,18 @@ else
       exit 1
       ;;
     esac
+  fi
+  # --captain-words-file puts the captain's exact words ahead of Firstmate's
+  # own text as a hashed verbatim block (bin/fm-captain-words-lib.sh), so the
+  # receiver reads what the captain said, not only Firstmate's retelling. The
+  # rest of the message becomes the labelled Firstmate's note. A file that
+  # already holds blocks (an incoming inbox record) passes them on unchanged.
+  if [ -n "$CAPTAIN_WORDS_FILE" ]; then
+    CAPTAIN_WORDS_BLOCK=$(fm_captain_words_render "$CAPTAIN_WORDS_FILE") || {
+      echo "error: --captain-words-file could not be rendered; nothing was sent" >&2
+      exit 1
+    }
+    MESSAGE="${CAPTAIN_WORDS_BLOCK}"$'\n\n'"### Firstmate's note"$'\n'"${MESSAGE}"
   fi
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.

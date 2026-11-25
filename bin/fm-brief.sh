@@ -14,9 +14,14 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab] [--captain-words-file <path>]
+#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab] [--captain-words-file <path>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --captain-words-file <path> seeds `## Captain's intent` with the captain's
+#   exact words as a hashed verbatim block ahead of the {TASK} context fill.
+#   Pass the captain's own message, or the inbox record that brought the work
+#   in (its quoted blocks are carried over unchanged); fm-spawn refuses a block
+#   edited after capture (bin/fm-captain-words-lib.sh owns the format).
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -176,6 +181,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-captain-words-lib.sh
+. "$SCRIPT_DIR/fm-captain-words-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
@@ -235,6 +242,7 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
 PROJECT_DIR_SET=0
+CAPTAIN_WORDS_FILE=
 POS=()
 want_value=
 for a in "$@"; do
@@ -251,6 +259,7 @@ for a in "$@"; do
       pr) PR_TEXT=$a; PR_TEXT_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
+      captain-words-file) CAPTAIN_WORDS_FILE=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -277,6 +286,8 @@ for a in "$@"; do
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
     --project) want_value="project" ;;
     --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
+    --captain-words-file) want_value="captain-words-file" ;;
+    --captain-words-file=*) CAPTAIN_WORDS_FILE=${a#--captain-words-file=} ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -285,6 +296,10 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+if [ -n "$CAPTAIN_WORDS_FILE" ] && [ "$KIND" = secondmate ]; then
+  echo "error: --captain-words-file seeds a ship or scout brief's Captain's intent; a secondmate charter has none" >&2
+  exit 1
+fi
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -564,6 +579,9 @@ A plain \`echo\` that includes the same \`corr=<id>\` on this parent channel is 
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
 Before treating an investigation or visual review as complete, load \`captain-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
+A request that carries a \`### Captain's words (verbatim)\` block quotes the captain exactly; the text after it is the main firstmate's reading, which may be wrong. Where the two disagree, the captain's words win: follow them, and say what differs in your status reply.
+When you brief a crewmate for that request, scaffold with \`bin/fm-brief.sh ... --captain-words-file <the request's inbox record>\` so your crewmate gets the same words, and never edit the quoted block; your own reading goes after it and in the spec.
+Pass a question on as a question and a condition exactly as stated, and credit nothing to the captain that is not inside the quote.
 A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
 A request arriving through the instruction inbox below follows the same marker and reply rules.
 
@@ -649,6 +667,18 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 {FIRSTMATE_SPEC}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
+# --captain-words-file seeds Captain's intent with the captain's exact words as
+# a hashed verbatim block (bin/fm-captain-words-lib.sh) ahead of the {TASK}
+# context fill, so the worker and the intent reviewer read what the captain
+# actually said. Given a secondmate's incoming inbox record, it carries the
+# blocks Firstmate quoted there unchanged; fm-spawn refuses an edited block.
+if [ -n "$CAPTAIN_WORDS_FILE" ]; then
+  CAPTAIN_WORDS_BLOCK=$(fm_captain_words_render "$CAPTAIN_WORDS_FILE") || {
+    echo "error: --captain-words-file could not be rendered; no brief was written" >&2
+    exit 1
+  }
+  TASK_SECTION="# Task"$'\n'"## Captain's intent"$'\n'"$CAPTAIN_WORDS_BLOCK"$'\n\n'"{TASK}"$'\n\n'"## Firstmate spec"$'\n'"{FIRSTMATE_SPEC}"
+fi
 
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.
