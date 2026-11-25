@@ -286,7 +286,7 @@ family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
-    fm-brief.test.sh|fm-dod-lib.test.sh|fm-merge-local.test.sh|fm-vendor-auth-probe.test.sh|\
+    fm-brief.test.sh|fm-captain-words.test.sh|fm-dod-lib.test.sh|fm-merge-local.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
@@ -773,6 +773,7 @@ tests/fm-calm-claude-mod.test.sh 2527
 tests/fm-calm-pi-extension.test.sh 56463
 tests/fm-calm-pi-queue-retention-live-e2e.test.sh 1345
 tests/fm-capacity-auto.test.sh 36243
+tests/fm-captain-words.test.sh 3000
 tests/fm-check-unregister.test.sh 469
 tests/fm-ci-workflow.test.sh 5833
 tests/fm-classify-corr-token.test.sh 23085
@@ -1695,6 +1696,11 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-read-repetition.test.sh
       printf '%s\n' __script__:fm-read-repetition-live.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      ;;
+    bin/fm-captain-words-lib.sh|bin/fm-captain-words.sh|.pi/extensions/fm-captain-words-capture.ts)
+      printf '%s\n' __script__:fm-captain-words.test.sh
+      printf '%s\n' __script__:fm-brief.test.sh
+      printf '%s\n' __script__:fm-send-secondmate-marker.test.sh
       ;;
     tests/fixtures/fm-claude-request-capture.py)
       printf '%s\n' __script__:fm-claude-tool-exclude-live.test.sh

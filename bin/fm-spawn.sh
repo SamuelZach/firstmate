@@ -974,6 +974,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-captain-words-lib.sh
+. "$SCRIPT_DIR/fm-captain-words-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -4335,6 +4337,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
   if fm_brief_task_placeholders_present "$BRIEF"; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
+    exit 1
+  fi
+  if ! fm_captain_words_verify "$BRIEF"; then
+    echo "error: $BRIEF quotes the captain's words in a block that is malformed or was edited; only the captain's exact words belong inside it, so re-scaffold with --captain-words-file and put Firstmate's reading after the block" >&2
     exit 1
   fi
   if ! fm_brief_task_content_valid "$BRIEF"; then

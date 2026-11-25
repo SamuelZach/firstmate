@@ -323,6 +323,13 @@ fm_brief_task_placeholders_present() {  # <file>
   [ -f "$file" ] || return 1
   intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
   spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
+  # A seeded verbatim captain-words block (bin/fm-captain-words-lib.sh) does
+  # not count as the fill: the {TASK} context line after it still must be.
+  intent=$(printf '%s\n' "$intent" | awk '
+    $0 == "### Captain'\''s words (verbatim)" { skip = 1; next }
+    skip && /^<!-- fm-captain-words sha256=[0-9a-f]+ -->$/ { skip = 0; next }
+    !skip { print }
+  ')
   [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
   [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
   return 1
